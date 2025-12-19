@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>食品批發供應商查詢系統</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" 
+          crossorigin=""/>
+    
+    <!-- Leaflet Drawing CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+    
+    <style>
+        #map {
+            height: 50vh;
+            width: 100%;
+        }
+        .coordinates-container {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        .coordinate {
+            font-family: monospace;
+            background-color: #e9ecef;
+            padding: 2px 5px;
+            border-radius: 3px;
+            margin: 2px;
+        }
+        .control-panel {
+            margin: 10px 0;
+        }
+        button {
+            padding: 8px 15px;
+            margin: 5px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>食品批發供應商查詢系統</h1>
+    
+    <div class="control-panel">
+        <button id="drawBtn">選擇查詢區域</button>
+        <button id="clearBtn">清除所有區域</button>
+        <button id="deleteBtn" disabled>刪除上一個區域</button>
+    </div>
+    
+    <div class="coordinates-container">
+        <h3>查詢區域範圍：</h3>
+        <div id="coordinates">
+            <p>請在地圖上繪製一個矩形區域以查詢食品批發供應商</p>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" 
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" 
+            crossorigin=""></script>
+    
+    <!-- Leaflet Drawing JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    
+    <script>
+        window.__gv__ = {
+            GPS: null
+        };
+        
+        window.GetNow = () => `${new Date(Date.now()+8*3600*1000).toISOString().replace('T', ' ').split('.')[0]}（香港時間）`;
+        
+        window.GetGPSLocation = () => {
+            return new Promise((resolve, reject) => {
+                if (!navigator.geolocation) {
+                    reject(new Error('此瀏覽器不支援地理定位功能'));
+                    return;
+                }
+                
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const response = {
+                            coords: position.coords,
+                            timestamp: `${new Date(position.timestamp + 8*3600*1000).toISOString().replace('T', ' ').split('.')[0]}（香港時間）`
+                        };
+                        window.__gv__.GPS = response
+                        // console.log('GPS 位置:', window.__gv__.GPS);
+                        resolve(response);
+                    },
+                    (error) => {
+                        console.error('獲取位置時發生錯誤:', error);
+                        // 如果 GPS 失敗，預設使用香港天文台座標
+                        const fallbackPosition = {
+                            coords: {
+                                latitude: 22.3027,
+                                longitude: 114.1772,
+                                accuracy: 0
+                            },
+                            timestamp: window.GetNow()
+                        };
+                        window.__gv__.GPS = fallbackPosition;
+                        resolve(fallbackPosition);
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 60000
+                    }
+                );
+            });
+        };
+        // 初始化應用程式
+        (async () => {
+            try {
+                await window.GetGPSLocation();
+                
+                // console.log('已初始化，資料:', window.__gv__);
+                
+                // 使用 GPS 位置或後備位置初始化地圖
+                const initialLat = window.__gv__.GPS?.coords?.latitude || 22.3027;
+                const initialLng = window.__gv__.GPS?.coords?.longitude || 114.1772;
+                
+                const map = L.map('map').setView([initialLat, initialLng], 18);
+                
+                // 添加底圖圖層
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> 貢獻者'
+                }).addTo(map);
+                // 儲存已繪製矩形的變數
+                let drawnRectangles = [];
+                let drawControl;
+                let currentDrawing = false;
+                // 初始化繪製控制項
+                function initDrawControl() {
+                    drawControl = new L.Control.Draw({
+                        draw: {
+                            polygon: false,
+                            polyline: false,
+                            circle: false,
+                            circlemarker: false,
+                            marker: false,
+                            rectangle: {
+                                shapeOptions: {
+                                    color: '#3388ff',
+                                    weight: 2,
+                                    fillColor: '#3388ff',
+                                    fillOpacity: 0.2
+                                }
+                            }
+                        },
+                        edit: false
+                    });
+                }
+                // 更新座標顯示的函數
+                async function updateCoordinates(rectangle) {
+                    const bounds = rectangle.getBounds();
+                    const corners = {
+                        NW: bounds.getNorthWest(), // 左上角
+                        NE: bounds.getNorthEast(), // 右上角
+                        SE: bounds.getSouthEast(), // 右下角
+                        SW: bounds.getSouthWest()  // 左下角
+                    };
+                    const coordinatesDiv = document.getElementById('coordinates');
+                    coordinatesDiv.innerHTML = `<p>更新時間：${window.__gv__.GPS?.timestamp || window.GetNow()}</p>`;
+                    const apiParams = {
+                        lat: {
+                            min: corners.SW.lat,
+                            max: corners.NE.lat,
+                        },
+                        lng: {
+                            min: corners.SW.lng,
+                            max: corners.NE.lng,
+                        }
+                    };
+                    const response = await fetch(`https://portal.csdi.gov.hk/server/services/common/fehd_rcd_1630036390312_58893/MapServer/WFSServer?service=wfs&request=GetFeature&typenames=FEHD_RL&outputFormat=geojson&maxFeatures=${100}&srsName=EPSG:4326&filter=<Filter><Intersects><PropertyName>SHAPE</PropertyName><gml:Envelope srsName='EPSG:4326'><gml:lowerCorner>${apiParams.lat.min} ${apiParams.lng.min}</gml:lowerCorner><gml:upperCorner>${apiParams.lat.max} ${apiParams.lng.max}</gml:upperCorner></gml:Envelope></Intersects></Filter>`);
+                    const jdata = await response.json();
+                    
+                    if (jdata && jdata.features) {
+                        // 先清除現有的標記
+                        if (window.restaurantMarkers) {
+                            window.restaurantMarkers.forEach(marker => map.removeLayer(marker));
+                        }
+                        
+                        window.restaurantMarkers = [];
+                        
+                        jdata.features.forEach(feature => {
+                            const coords = feature.geometry.coordinates;
+                            const props = feature.properties;
+                            
+                            // 建立標記
+                            const marker = L.marker([coords[1], coords[0]]);
+                            
+                            // 建立彈出視窗內容
+                            const popupContent = `
+                                <div style="max-width: 300px;max-height: 50vh">
+                                    <h3>
+                                        ${props.NSEARCH03_TC || ''} / ${props.NSEARCH03_EN || ''}
+                                    </h3>
+                                    <div class="d-flex flex-row">
+                                        <p class="m-1">
+                                            <strong>牌照類別：</strong>
+                                            <br/>
+                                            ${props.NAME_TC || ''} / ${props.NAME_EN || ''}
+                                        </p>
+                                        <p class="m-1">
+                                            <strong>資料集：</strong>
+                                            <br/>
+                                            ${props.DATASET_EN || ''} / ${props.DATASET_TC || ''}
+                                        </p>
+                                        <p class="m-1">
+                                            <strong>地址：</strong>
+                                            <ul>
+                                                <li>${props.ADDRESS_TC || ''}</li>
+                                                <li>${props.ADDRESS_EN || ''}</li>
+                                            </ul>
+                                        </p>
+                                        <p class="m-1">
+                                            <strong>牌照到期日：</strong> ${props.NSEARCH05_EN || '不適用'}
+                                        </p>
+                                        <p class="m-1">
+                                            <strong>更新日期：</strong> ${props.LASTUPDATE || '不適用'}
+                                        </p>
+                                    </div>
+                                </div>
+                            `;
+                            
+                            marker.bindPopup(popupContent);
+                            marker.addTo(map);
+                            window.restaurantMarkers.push(marker);
+                            
+                            // 添加點擊事件以顯示彈出視窗
+                            marker.on('click', function() {
+                                this.openPopup();
+                            });
+                        });
+                        
+                        // 如果有標記，調整地圖範圍以顯示所有標記及矩形
+                        if (window.restaurantMarkers.length > 0) {
+                            const group = new L.featureGroup([...window.restaurantMarkers, rectangle]);
+                            map.fitBounds(group.getBounds().pad(0.1));
+                        }
+                    }
+                }
+                // 清除所有矩形的函數
+                function clearRectangles() {
+                    drawnRectangles.forEach(rect => map.removeLayer(rect));
+                    drawnRectangles = [];
+                    document.getElementById('coordinates').innerHTML = '<p>請在地圖上繪製一個矩形區域以查詢食品批發供應商</p>';
+                    document.getElementById('deleteBtn').disabled = true;
+                }
+                // 刪除最後一個矩形的函數
+                async function deleteLastRectangle() {
+                    if (drawnRectangles.length > 0) {
+                        const lastRect = drawnRectangles.pop();
+                        map.removeLayer(lastRect);
+                        
+                        if (drawnRectangles.length > 0) {
+                            await updateCoordinates(drawnRectangles[drawnRectangles.length - 1]);
+                        } else {
+                            document.getElementById('coordinates').innerHTML = '<p>請在地圖上繪製一個矩形區域以查詢食品批發供應商</p>';
+                            document.getElementById('deleteBtn').disabled = true;
+                        }
+                    }
+                }
+                // 按鈕的事件監聽器
+                document.getElementById('drawBtn').addEventListener('click', function() {
+                    if (!currentDrawing) {
+                        map.addControl(drawControl);
+                        currentDrawing = true;
+                        this.disabled = true;
+                    }
+                });
+                document.getElementById('clearBtn').addEventListener('click', clearRectangles);
+                document.getElementById('deleteBtn').addEventListener('click', deleteLastRectangle);
+                // 處理矩形建立事件
+                map.on(L.Draw.Event.CREATED, async function(event) {
+                    const layer = event.layer;
+                    drawnRectangles.push(layer);
+                    map.addLayer(layer);
+                    
+                    // 更新座標顯示
+                    await updateCoordinates(layer);
+                    
+                    // 移除繪製控制項並重新啟用繪製按鈕
+                    map.removeControl(drawControl);
+                    currentDrawing = false;
+                    document.getElementById('drawBtn').disabled = false;
+                    document.getElementById('deleteBtn').disabled = false;
+                    
+                    // 為現有矩形添加點擊事件以顯示座標
+                    layer.on('click', async function() {
+                        await updateCoordinates(layer);
+                    });
+                });
+                // 初始化繪製控制項
+                initDrawControl();
+                // 在繪製模式下點擊地圖時取消繪製的事件
+                map.on('click', function() {
+                    if (currentDrawing) {
+                        map.removeControl(drawControl);
+                        currentDrawing = false;
+                        document.getElementById('drawBtn').disabled = false;
+                    }
+                });
+            } catch (error) {
+                console.error('初始化應用程式時發生錯誤:', error);
+                // 如果全部失敗，使用後備初始化
+                const map = L.map('map').setView([22.3027, 114.1772], 18);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                alert('應用程式初始化失敗，使用預設位置（香港天文台）');
+            }
+        })();
+    </script>
+</body>
+</html>
